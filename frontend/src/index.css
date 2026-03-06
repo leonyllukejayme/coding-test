@@ -157,6 +157,75 @@ body {
   gap: 16px;
 }
 
+.room-form {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.room-form label {
+  font-size: 0.75rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+
+.room-form input {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  font-size: 0.95rem;
+}
+
+.room-form input:focus-visible {
+  outline: 2px solid rgba(48, 198, 255, 0.9);
+}
+
+.room-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.room-actions button {
+  flex: 1;
+  border-radius: 12px;
+  border: none;
+  padding: 0.8rem 1rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.room-actions button:first-of-type {
+  background: linear-gradient(135deg, #7f7af6, #5dc9ff);
+  color: #fff;
+}
+
+.room-actions button:last-of-type {
+  background: linear-gradient(135deg, #48ffb4, #5dd9ff);
+  color: #0b0d18;
+}
+
+.room-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.form-note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.8);
+}
+
 .status-card {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 14px;
@@ -208,6 +277,22 @@ body {
 .player-symbol {
   font-size: 1.5rem;
   font-weight: 700;
+}
+
+.player-details {
+  display: flex;
+  flex-direction: column;
+}
+
+.player-details p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.player-details small {
+  margin-top: 0.2rem;
+  font-size: 0.8rem;
+  opacity: 0.7;
 }
 
 .player-card p {

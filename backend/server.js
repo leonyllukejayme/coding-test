@@ -13,24 +13,18 @@ const port = 3000;
 
 app.use(cors());
 
-const SYMBOLS = ["X", "O"];
-const game = {
-  board: Array(9).fill(null),
-  currentTurn: "X",
-  winner: null,
-  players: {},
-};
-const waitingPlayers = [];
+const rooms = new Map();
+const socketAssignments = new Map();
 
 app.get("/", (req, res) => {
   res.sendFile(join(__dirname, "index.html"));
 });
 
 // Reset board data while keeping the current player assignments intact.
-function resetGameState() {
-  game.board = Array(9).fill(null);
-  game.currentTurn = "X";
-  game.winner = null;
+function resetRoomState(room) {
+  room.board = Array(9).fill(null);
+  room.currentTurn = "X";
+  room.winner = null;
 }
 
 // Check the classic win lines for a winning symbol.
@@ -54,131 +48,208 @@ function calculateWinner(squares) {
   return null;
 }
 
-// Capture which symbols are currently assigned and how many spectators are waiting.
-function getPlayersStatus() {
-  const assignedSymbols = Object.values(game.players);
-  const waiting = waitingPlayers.filter((socket) => socket.connected).length;
-  return {
-    X: assignedSymbols.includes("X"),
-    O: assignedSymbols.includes("O"),
-    waiting,
-  };
-}
-
 // Build the status copy that will be shown on every client.
-function createStatus(isDraw, playersStatus) {
-  if (game.winner) {
-    return `Winner: ${game.winner}`;
+function createStatus(room, isDraw) {
+  if (!room) {
+    return "No room yet.";
   }
-  if (!playersStatus.X || !playersStatus.O) {
-    return "Waiting for two players to join.";
+  const playersFilled = Object.values(room.players).filter(Boolean).length;
+  if (room.winner) {
+    const winnerName = room.players[room.winner]?.name;
+    return winnerName ? `Winner: ${room.winner} (${winnerName})` : `Winner: ${room.winner}`;
+  }
+  if (playersFilled < 2) {
+    const remaining = 2 - playersFilled;
+    return `Waiting for ${remaining} more player${remaining > 1 ? "s" : ""}.`;
   }
   if (isDraw) {
     return "Draw!";
   }
-  return `Next player: ${game.currentTurn}`;
+  const currentPlayerName = room.players[room.currentTurn]?.name;
+  return currentPlayerName
+    ? `Next player: ${room.currentTurn} (${currentPlayerName}).`
+    : `Next player: ${room.currentTurn}.`;
 }
 
 // Package the board snapshot that each client needs.
-function buildState() {
-  const isDraw = !game.winner && game.board.every(Boolean);
-  const playersStatus = getPlayersStatus();
+function buildState(room) {
+  if (!room) {
+    return null;
+  }
+  const isDraw = !room.winner && room.board.every(Boolean);
+  const status = createStatus(room, isDraw);
   return {
-    board: [...game.board],
-    currentTurn: game.currentTurn,
-    winner: game.winner,
+    roomId: room.id,
+    board: [...room.board],
+    currentTurn: room.currentTurn,
+    winner: room.winner,
     isDraw,
-    status: createStatus(isDraw, playersStatus),
-    players: playersStatus,
+    status,
+    players: {
+      X: room.players.X
+        ? { ready: true, name: room.players.X.name }
+        : { ready: false, name: null },
+      O: room.players.O
+        ? { ready: true, name: room.players.O.name }
+        : { ready: false, name: null },
+    },
   };
 }
 
 // Broadcast the latest board snapshot to all clients.
-function broadcastState() {
-  io.emit("state update", buildState());
-}
-
-// Assign the next available symbol or queue the socket for the next slot.
-function assignPlayerSymbol(socket) {
-  const assignedSymbols = Object.values(game.players);
-  const availableSymbol = SYMBOLS.find((symbol) => !assignedSymbols.includes(symbol));
-  if (availableSymbol) {
-    game.players[socket.id] = availableSymbol;
-    return availableSymbol;
-  }
-  waitingPlayers.push(socket);
-  return null;
-}
-
-// Drop a socket from the waiting queue when it disconnects.
-function removeFromWaitingQueue(socket) {
-  const index = waitingPlayers.findIndex((candidate) => candidate.id === socket.id);
-  if (index > -1) {
-    waitingPlayers.splice(index, 1);
-  }
-}
-
-// Give the next queued spectator the freed symbol slot.
-function promoteWaitingPlayer(symbol) {
-  while (waitingPlayers.length) {
-    const nextSocket = waitingPlayers.shift();
-    if (!nextSocket.connected) {
-      continue;
-    }
-    game.players[nextSocket.id] = symbol;
-    nextSocket.emit("assign symbol", symbol);
+function broadcastRoom(roomId) {
+  const room = rooms.get(roomId);
+  const state = buildState(room);
+  if (!state) {
     return;
   }
+  io.to(roomId).emit("state update", state);
 }
 
-// Cleanup a disconnect so the symbol can be reused.
-function cleanupSocket(socket) {
-  removeFromWaitingQueue(socket);
-  const symbol = game.players[socket.id];
-  delete game.players[socket.id];
-  if (symbol) {
-    promoteWaitingPlayer(symbol);
+function prepareRoom(roomId) {
+  if (rooms.has(roomId)) {
+    return rooms.get(roomId);
   }
+  const newRoom = {
+    id: roomId,
+    board: Array(9).fill(null),
+    currentTurn: "X",
+    winner: null,
+    players: {
+      X: null,
+      O: null,
+    },
+  };
+  rooms.set(roomId, newRoom);
+  return newRoom;
+}
+
+function assignRoomSymbol(room, socketId, name) {
+  if (room.players.X && room.players.O) {
+    return null;
+  }
+  const symbol = room.players.X ? "O" : "X";
+  room.players[symbol] = { socketId, name };
+  return symbol;
+}
+
+function detachFromRoom(socket) {
+  const assignment = socketAssignments.get(socket.id);
+  if (!assignment) {
+    return;
+  }
+  const room = rooms.get(assignment.roomId);
+  if (room && room.players[assignment.symbol]) {
+    if (room.players[assignment.symbol].socketId === socket.id) {
+      room.players[assignment.symbol] = null;
+    }
+    if (!room.players.X && !room.players.O) {
+      rooms.delete(room.id);
+    } else {
+      broadcastRoom(room.id);
+    }
+  }
+  socket.leave(assignment.roomId);
+  socketAssignments.delete(socket.id);
 }
 
 // Validate a move request, update the board, then re-broadcast.
 function applyMove(socket, index) {
-  const symbol = game.players[socket.id];
-  if (!symbol || game.winner || game.currentTurn !== symbol || game.board[index]) {
+  const assignment = socketAssignments.get(socket.id);
+  if (!assignment) {
     return;
   }
-  game.board[index] = symbol;
-  game.winner = calculateWinner(game.board);
-  if (!game.winner) {
-    game.currentTurn = symbol === "X" ? "O" : "X";
+  const room = rooms.get(assignment.roomId);
+  if (
+    !room ||
+    room.winner ||
+    room.currentTurn !== assignment.symbol ||
+    room.board[index]
+  ) {
+    return;
   }
-  broadcastState();
+  room.board[index] = assignment.symbol;
+  room.winner = calculateWinner(room.board);
+  if (!room.winner) {
+    room.currentTurn = assignment.symbol === "X" ? "O" : "X";
+  }
+  broadcastRoom(room.id);
 }
 
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
-  const symbol = assignPlayerSymbol(socket);
-  if (symbol) {
-    socket.emit("assign symbol", symbol);
-  } else {
-    socket.emit("waiting", "You are queued for the next available slot.");
-  }
-
   socket.on("make move", (index) => {
     applyMove(socket, index);
   });
 
   socket.on("reset game", () => {
-    resetGameState();
-    broadcastState();
+    const assignment = socketAssignments.get(socket.id);
+    if (!assignment) {
+      return;
+    }
+    const room = rooms.get(assignment.roomId);
+    if (!room) {
+      return;
+    }
+    resetRoomState(room);
+    broadcastRoom(room.id);
   });
 
   socket.on("disconnect", () => {
-    cleanupSocket(socket);
-    broadcastState();
+    detachFromRoom(socket);
   });
 
-  broadcastState();
+  socket.on("create room", ({ roomId, name }) => {
+    const normalizedRoom = roomId?.trim();
+    const normalizedName = name?.trim();
+    if (!normalizedRoom || !normalizedName) {
+      socket.emit("room error", "Provide both a room name and your player name.");
+      return;
+    }
+    if (rooms.has(normalizedRoom)) {
+      socket.emit("room error", `Room "${normalizedRoom}" already exists.`);
+      return;
+    }
+    const room = prepareRoom(normalizedRoom);
+    detachFromRoom(socket);
+    const symbol = assignRoomSymbol(room, socket.id, normalizedName);
+    if (!symbol) {
+      socket.emit("room error", "Room is already full.");
+      return;
+    }
+    socketAssignments.set(socket.id, { roomId: normalizedRoom, symbol, name: normalizedName });
+    socket.join(normalizedRoom);
+    socket.emit("assign symbol", { symbol, roomId: normalizedRoom });
+    broadcastRoom(normalizedRoom);
+  });
+
+  socket.on("join room", ({ roomId, name }) => {
+    const normalizedRoom = roomId?.trim();
+    const normalizedName = name?.trim();
+    if (!normalizedRoom || !normalizedName) {
+      socket.emit("room error", "Provide both a room name and your player name.");
+      return;
+    }
+    const room = rooms.get(normalizedRoom);
+    if (!room) {
+      socket.emit("room error", `Room "${normalizedRoom}" not found.`);
+      return;
+    }
+    if (room.players.X && room.players.O) {
+      socket.emit("room error", `Room "${normalizedRoom}" is full.`);
+      return;
+    }
+    detachFromRoom(socket);
+    const symbol = assignRoomSymbol(room, socket.id, normalizedName);
+    if (!symbol) {
+      socket.emit("room error", "Unable to join this room.");
+      return;
+    }
+    socketAssignments.set(socket.id, { roomId: normalizedRoom, symbol, name: normalizedName });
+    socket.join(normalizedRoom);
+    socket.emit("assign symbol", { symbol, roomId: normalizedRoom });
+    broadcastRoom(normalizedRoom);
+  });
 });
 
 server.listen(port, () => {

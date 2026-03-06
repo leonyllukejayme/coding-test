@@ -33,20 +33,31 @@ function Board({ squares, onSquareClick }) {
 }
 
 // Game manages the board state with server events and exposes controls.
+const getInitialRoomId = () => {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const params = new URLSearchParams(window.location.search);
+  return params.get("room") || "";
+};
+
 export default function Game() {
   const [squares, setSquares] = useState(Array(9).fill(null));
   const [currentTurn, setCurrentTurn] = useState("X");
   const [statusMessage, setStatusMessage] = useState("Connecting to server...");
   const [playerSymbol, setPlayerSymbol] = useState(null);
-  const [playersOnline, setPlayersOnline] = useState({
-    X: false,
-    O: false,
-    waiting: 0,
+  const [playersInfo, setPlayersInfo] = useState({
+    X: { ready: false, name: null },
+    O: { ready: false, name: null },
   });
   const [winner, setWinner] = useState(null);
   const [isDraw, setIsDraw] = useState(false);
   const [connected, setConnected] = useState(false);
   const socketRef = useRef(null);
+  const [playerNameInput, setPlayerNameInput] = useState("");
+  const [roomInput, setRoomInput] = useState(getInitialRoomId());
+  const [joinedRoomId, setJoinedRoomId] = useState("");
+  const [joinFeedback, setJoinFeedback] = useState("Enter a name and room to start.");
 
   // Keep a persistent socket connection alive for the lifetime of the component.
   useEffect(() => {
@@ -55,18 +66,38 @@ export default function Game() {
 
     socket.on("connect", () => {
       setConnected(true);
-      setStatusMessage("Connected to the server. Waiting for the current game state...");
+      setStatusMessage("Connected to the server. Enter a room to start playing.");
+      setJoinFeedback("Enter your name and room to join a match.");
     });
 
     socket.on("disconnect", () => {
       setConnected(false);
       setPlayerSymbol(null);
-      setStatusMessage("Disconnected from server. Reconnect to play or spectate.");
+      setStatusMessage("Disconnected from the server.");
+      setJoinedRoomId("");
+      setPlayersInfo({
+        X: { ready: false, name: null },
+        O: { ready: false, name: null },
+      });
+      setJoinFeedback("Disconnected. Reconnect to create or join a room.");
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("room");
+        window.history.replaceState({}, "", url);
+      }
     });
 
-    socket.on("assign symbol", (symbol) => {
+    socket.on("assign symbol", ({ symbol, roomId }) => {
       setPlayerSymbol(symbol);
-      setStatusMessage(`You are Player "${symbol}".`);
+      setJoinedRoomId(roomId);
+      setStatusMessage(`You are Player "${symbol}" in room "${roomId}".`);
+      setJoinFeedback(`Joined room "${roomId}".`);
+      if (typeof window !== "undefined") {
+        setRoomInput(roomId);
+        const url = new URL(window.location.href);
+        url.searchParams.set("room", roomId);
+        window.history.replaceState({}, "", url);
+      }
     });
 
     socket.on("state update", (gameState) => {
@@ -75,10 +106,14 @@ export default function Game() {
       setWinner(gameState.winner);
       setIsDraw(gameState.isDraw);
       setStatusMessage(gameState.status);
-      setPlayersOnline(gameState.players);
+      setPlayersInfo(gameState.players);
+      if (gameState.roomId) {
+        setJoinedRoomId(gameState.roomId);
+      }
     });
 
-    socket.on("waiting", (message) => {
+    socket.on("room error", (message) => {
+      setJoinFeedback(message);
       setStatusMessage(message);
     });
 
@@ -103,8 +138,38 @@ export default function Game() {
     socketRef.current?.emit("reset game");
   }
 
+  function requestRoomAction(eventName) {
+    const trimmedName = playerNameInput.trim();
+    const trimmedRoom = roomInput.trim();
+    if (!trimmedName || !trimmedRoom) {
+      setJoinFeedback("Please enter both a player name and a room.");
+      return;
+    }
+    if (!connected) {
+      setJoinFeedback("Waiting for a healthy connection to the server...");
+      return;
+    }
+    socketRef.current?.emit(eventName, {
+      roomId: trimmedRoom,
+      name: trimmedName,
+    });
+  }
+
+  function handleCreateRoom() {
+    requestRoomAction("create room");
+  }
+
+  function handleJoinRoom() {
+    requestRoomAction("join room");
+  }
+
   const renderConnectionStatus = () => (connected ? "Live" : "Offline");
-  const watchingLabel = playerSymbol ? `Player "${playerSymbol}"` : "Spectating";
+  const assignedName = playerSymbol ? playersInfo[playerSymbol]?.name : null;
+  const watchingLabel = playerSymbol
+    ? assignedName
+      ? `Player "${playerSymbol}" • ${assignedName}`
+      : `Player "${playerSymbol}"`
+    : "Waiting to join a room";
 
   return (
     <div className="app-stage">
@@ -137,22 +202,54 @@ export default function Game() {
         </section>
 
         <section className="info-panel">
+          <div className="room-form">
+            <label htmlFor="player-name">Player name</label>
+            <input
+              id="player-name"
+              type="text"
+              placeholder="e.g. Mila, Captain X"
+              value={playerNameInput}
+              onChange={(event) => setPlayerNameInput(event.target.value)}
+            />
+            <label htmlFor="room-id">Room ID</label>
+            <input
+              id="room-id"
+              type="text"
+              placeholder="Room name (letters + numbers only)"
+              value={roomInput}
+              onChange={(event) => setRoomInput(event.target.value)}
+            />
+            <div className="room-actions">
+              <button type="button" onClick={handleCreateRoom} disabled={!connected}>
+                Create room
+              </button>
+              <button type="button" onClick={handleJoinRoom} disabled={!connected}>
+                Join room
+              </button>
+            </div>
+            {joinFeedback && <p className="form-note">{joinFeedback}</p>}
+          </div>
+
           <div className="status-card">
             <p className="status-label">{watchingLabel}</p>
             <h2 className="status-message">{statusMessage}</h2>
-            <p className="queue">Queue: {playersOnline.waiting} waiting for a slot.</p>
+            <p className="queue">Room: {joinedRoomId || "Not joined"}</p>
           </div>
 
           <div className="player-grid">
-            <div className={`player-card ${playersOnline.X ? "active" : "idle"}`}>
+            <div className={`player-card ${playersInfo.X.ready ? "active" : "idle"}`}>
               <span className="player-symbol">X</span>
-              <p>Player X</p>
-              <small>{playersOnline.X ? "Ready" : "Waiting"}</small>
+              <div className="player-details">
+                <p>{playersInfo.X.name || "Player X slot"}</p>
+                <small>{playersInfo.X.ready ? "Connected" : "Waiting for someone"}</small>
+              </div>
             </div>
-            <div className={`player-card ${playersOnline.O ? "active" : "idle"}`}>
+            <div className={`player-card ${playersInfo.O.ready ? "active" : "idle"}`}>
               <span className="player-symbol">O</span>
-              <p>Player O</p>
-              <small>{playersOnline.O ? "Ready" : "Waiting"}</small>
+              <div className="player-details">
+                <p>{playersInfo.O.name || "Player O slot"}</p>
+                <small>{playersInfo.O.ready ? "Connected" : "Waiting for someone"}</small>
+              </div>
             </div>
           </div>
 
