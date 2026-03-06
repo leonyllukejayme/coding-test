@@ -1,7 +1,7 @@
-import React,{ useState } from "react"
-
-
+import React, { useEffect, useRef, useState } from "react";
+import { io } from "socket.io-client";
 function Square({ value, onSquareClick }) {
+  // Render one board cell and forward its clicks to the parent board.
   return (
     <button className="square" onClick={onSquareClick}>
       {value}
@@ -9,111 +9,158 @@ function Square({ value, onSquareClick }) {
   );
 }
 
-function Board({ xIsNext, squares, onPlay }) {
-  function handleClick(i) {
-    if (calculateWinner(squares) || squares[i]) {
-      return;
-    }
-    const nextSquares = squares.slice();
-    if (xIsNext) {
-      nextSquares[i] = 'X';
-    } else {
-      nextSquares[i] = 'O';
-    }
-    onPlay(nextSquares);
-  }
-
-  const winner = calculateWinner(squares);
-  let status;
-  if (winner) {
-    status = 'Winner: ' + winner;
-  } else {
-    status = 'Next player: ' + (xIsNext ? 'X' : 'O');
-  }
-
+function Board({ squares, onSquareClick }) {
+  // Display the board as three rows of squares.
   return (
     <>
-      <div className="status">{status}</div>
       <div className="board-row">
-        <Square value={squares[0]} onSquareClick={() => handleClick(0)} />
-        <Square value={squares[1]} onSquareClick={() => handleClick(1)} />
-        <Square value={squares[2]} onSquareClick={() => handleClick(2)} />
+        <Square value={squares[0]} onSquareClick={() => onSquareClick(0)} />
+        <Square value={squares[1]} onSquareClick={() => onSquareClick(1)} />
+        <Square value={squares[2]} onSquareClick={() => onSquareClick(2)} />
       </div>
       <div className="board-row">
-        <Square value={squares[3]} onSquareClick={() => handleClick(3)} />
-        <Square value={squares[4]} onSquareClick={() => handleClick(4)} />
-        <Square value={squares[5]} onSquareClick={() => handleClick(5)} />
+        <Square value={squares[3]} onSquareClick={() => onSquareClick(3)} />
+        <Square value={squares[4]} onSquareClick={() => onSquareClick(4)} />
+        <Square value={squares[5]} onSquareClick={() => onSquareClick(5)} />
       </div>
       <div className="board-row">
-        <Square value={squares[6]} onSquareClick={() => handleClick(6)} />
-        <Square value={squares[7]} onSquareClick={() => handleClick(7)} />
-        <Square value={squares[8]} onSquareClick={() => handleClick(8)} />
+        <Square value={squares[6]} onSquareClick={() => onSquareClick(6)} />
+        <Square value={squares[7]} onSquareClick={() => onSquareClick(7)} />
+        <Square value={squares[8]} onSquareClick={() => onSquareClick(8)} />
       </div>
     </>
   );
 }
 
+// Game manages the board state with server events and exposes controls.
 export default function Game() {
-  const [history, setHistory] = useState([Array(9).fill(null)]);
-  const [currentMove, setCurrentMove] = useState(0);
-  const xIsNext = currentMove % 2 === 0;
-  const currentSquares = history[currentMove];
-
-  function handlePlay(nextSquares) {
-    const nextHistory = [...history.slice(0, currentMove + 1), nextSquares];
-    setHistory(nextHistory);
-    setCurrentMove(nextHistory.length - 1);
-  }
-
-  function jumpTo(nextMove) {
-    setCurrentMove(nextMove);
-  }
-
-  const moves = history.map((squares, move) => {
-    let description;
-    if (move > 0) {
-      description = 'Go to move #' + move;
-    } else {
-      description = 'Go to game start';
-    }
-    return (
-      <li key={move}>
-        <button onClick={() => jumpTo(move)}>{description}</button>
-      </li>
-    );
+  const [squares, setSquares] = useState(Array(9).fill(null));
+  const [currentTurn, setCurrentTurn] = useState("X");
+  const [statusMessage, setStatusMessage] = useState("Connecting to server...");
+  const [playerSymbol, setPlayerSymbol] = useState(null);
+  const [playersOnline, setPlayersOnline] = useState({
+    X: false,
+    O: false,
+    waiting: 0,
   });
+  const [winner, setWinner] = useState(null);
+  const [isDraw, setIsDraw] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const socketRef = useRef(null);
+
+  // Keep a persistent socket connection alive for the lifetime of the component.
+  useEffect(() => {
+    const socket = io("http://localhost:3000");
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      setConnected(true);
+      setStatusMessage("Connected to the server. Waiting for the current game state...");
+    });
+
+    socket.on("disconnect", () => {
+      setConnected(false);
+      setPlayerSymbol(null);
+      setStatusMessage("Disconnected from server. Reconnect to play or spectate.");
+    });
+
+    socket.on("assign symbol", (symbol) => {
+      setPlayerSymbol(symbol);
+      setStatusMessage(`You are Player "${symbol}".`);
+    });
+
+    socket.on("state update", (gameState) => {
+      setSquares(gameState.board);
+      setCurrentTurn(gameState.currentTurn);
+      setWinner(gameState.winner);
+      setIsDraw(gameState.isDraw);
+      setStatusMessage(gameState.status);
+      setPlayersOnline(gameState.players);
+    });
+
+    socket.on("waiting", (message) => {
+      setStatusMessage(message);
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
+  // Only emit moves when the user is the assigned player, it is their turn, and the game is still ongoing.
+  function handleSquareClick(index) {
+    if (!playerSymbol || currentTurn !== playerSymbol || winner || isDraw) {
+      return;
+    }
+    if (squares[index]) {
+      return;
+    }
+    socketRef.current?.emit("make move", index);
+  }
+
+  // Ask the server to clear the board and restart the round.
+  function handleReset() {
+    socketRef.current?.emit("reset game");
+  }
+
+  const renderConnectionStatus = () => (connected ? "Live" : "Offline");
+  const watchingLabel = playerSymbol ? `Player "${playerSymbol}"` : "Spectating";
 
   return (
-    <div className="game">
-      <div className="game-board">
-        <Board xIsNext={xIsNext} squares={currentSquares} onPlay={handlePlay} />
-      </div>
-      <div className="game-info">
-        <ol>{moves}</ol>
-      </div>
+    <div className="app-stage">
+      <header className="app-header">
+        <div>
+          <h1>Tic Tac Toe Arena</h1>
+          <p>Fast-paced matches streamed from the server. Claim a corner and control the grid.</p>
+        </div>
+        <div className="meta-pulse">
+          <span>{renderConnectionStatus()}</span>
+          <small>Connection</small>
+        </div>
+      </header>
+
+      <main className="game-layout">
+        <section className="board-panel">
+          <div className="board-shell">
+            <Board squares={squares} onSquareClick={handleSquareClick} />
+          </div>
+          <div className="board-footer">
+            <div className="chip">
+              <span>Turn</span>
+              <strong>{currentTurn || "—"}</strong>
+            </div>
+            <div className="chip">
+              <span>Status</span>
+              <strong>{winner ? `${winner} wins` : isDraw ? "Draw" : statusMessage}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="info-panel">
+          <div className="status-card">
+            <p className="status-label">{watchingLabel}</p>
+            <h2 className="status-message">{statusMessage}</h2>
+            <p className="queue">Queue: {playersOnline.waiting} waiting for a slot.</p>
+          </div>
+
+          <div className="player-grid">
+            <div className={`player-card ${playersOnline.X ? "active" : "idle"}`}>
+              <span className="player-symbol">X</span>
+              <p>Player X</p>
+              <small>{playersOnline.X ? "Ready" : "Waiting"}</small>
+            </div>
+            <div className={`player-card ${playersOnline.O ? "active" : "idle"}`}>
+              <span className="player-symbol">O</span>
+              <p>Player O</p>
+              <small>{playersOnline.O ? "Ready" : "Waiting"}</small>
+            </div>
+          </div>
+
+          <button className="reset-button" type="button" onClick={handleReset} disabled={!connected}>
+            Reset board
+          </button>
+        </section>
+      </main>
     </div>
   );
 }
-
-function calculateWinner(squares) {
-  const lines = [
-    [0, 1, 2],
-    [3, 4, 5],
-    [6, 7, 8],
-    [0, 3, 6],
-    [1, 4, 7],
-    [2, 5, 8],
-    [0, 4, 8],
-    [2, 4, 6],
-  ];
-  for (let i = 0; i < lines.length; i++) {
-    const [a, b, c] = lines[i];
-    if (squares[a] && squares[a] === squares[b] && squares[a] === squares[c]) {
-      return squares[a];
-    }
-  }
-  return null;
-}
-
-
-
