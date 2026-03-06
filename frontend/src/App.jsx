@@ -50,7 +50,7 @@ export default function Game() {
 
   // Keep a persistent socket connection alive for the lifetime of the component.
   useEffect(() => {
-    const socket = io("http://localhost:3000");
+    const socket = io(import.meta.env.VITE_BACKEND_URL ||"");
     socketRef.current = socket;
 
     socket.on("connect", () => {
@@ -127,7 +127,7 @@ export default function Game() {
           <div className="board-footer">
             <div className="chip">
               <span>Turn</span>
-              <strong>{currentTurn || "—"}</strong>
+              <strong>{currentTurn || "ï¿½"}</strong>
             </div>
             <div className="chip">
               <span>Status</span>
